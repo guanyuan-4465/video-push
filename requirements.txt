@@ -1,0 +1,23 @@
+# GUI相关
+PyQt6>=6.8.1
+PyQt6-Qt6>=6.8.2
+PyQt6_sip>=13.10.0
+
+# 自动化相关
+playwright>=1.50.0
+
+# 调度相关
+schedule>=1.2.2
+
+# 日志相关
+loguru>=0.7.3
+
+# 网络请求相关
+requests>=2.32.3
+urllib3>=2.3.0  # requests的依赖
+
+# 数据验证
+pydantic>=2.6.1
+
+# 类型提示
+typing_extensions>=4.12.2

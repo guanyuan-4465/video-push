@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Virtual Environment
+vritual-envrionment/
+venv/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+
+# Logs
+logs/
+*.log
+
+# Local configs
+cookies/
+
+# Config and data
+config/
+
+# Packaging files
+dist/
+build/
+*.spec
