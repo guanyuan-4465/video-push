@@ -7,6 +7,8 @@ from src.utils.log import logger
 from pathlib import Path
 from src.config.base_config import ConfigManager
 from datetime import datetime
+from typing import Optional
+import asyncio
 
 class UploadController:
     def __init__(self):
@@ -70,29 +72,26 @@ class UploadController:
         """生成cookie"""
         return await self.cookie_service.generate_cookie(platform, cookie_path)
         
-    async def upload_content(self, platform: str, content_dir: Path) -> bool:
+    async def upload_content(self, platform: str, content_dir: Path, schedule_time: Optional[datetime] = None) -> bool:
         """处理内容上传"""
         try:
-            # 1. 扫描内容目录，获取内容信息
+            # 扫描内容
             content = self._scan_content(content_dir)
             if not content:
-                logger.error(f"未在目录 {content_dir} 中找到有效内容")
                 return False
 
-            # 2. 获取平台配置
-            platform_config = self.config_manager.config.get_platform_config(platform)
-            if not platform_config or not platform_config.get('cookie_path'):
-                raise ValueError(f"未找到 {platform} 平台的配置或 cookie")
-
-            # 3. 使用 upload_service 处理上传
-            return await self.upload_service.upload_content(
+            # 创建任务（无论是否定时）
+            task = UploadTask.create(
                 platform=platform,
-                content=content,
-                cookie_path=platform_config['cookie_path']
+                content_path=str(content_dir),
+                schedule_time=schedule_time or datetime.now()  # 如果不是定时，就立即执行
             )
             
+            # 添加到任务队列
+            return self.task_queue.add_task(task)
+            
         except Exception as e:
-            logger.error(f"上传控制失败: {e}")
+            logger.error(f"创建上传任务失败: {e}")
             return False
 
     def _scan_content(self, content_dir: Path) -> dict:
@@ -154,3 +153,26 @@ class UploadController:
             task.retry_count += 1
             return True
         return False
+
+    def upload_sync(self, platform: str, content_dir: Path) -> bool:
+        """同步上传方法"""
+        try:
+            content = self._scan_content(content_dir)
+            if not content:
+                return False
+            
+            # 获取平台配置
+            platform_config = self.config_manager.config.get_platform_config(platform)
+            if not platform_config or not platform_config.get('cookie_path'):
+                raise ValueError(f"未找到 {platform} 平台的配置或 cookie")
+            
+            # 使用 asyncio.run 执行异步上传
+            return asyncio.run(self.upload_service.upload_content(
+                platform=platform,
+                content=content,
+                cookie_path=platform_config['cookie_path']
+            ))
+            
+        except Exception as e:
+            logger.error(f"上传失败: {e}")
+            return False

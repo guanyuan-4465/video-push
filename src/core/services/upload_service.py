@@ -42,7 +42,7 @@ class UploadService:
                 title=content.get('title', ''),
                 file_path=content.get('video', ''),
                 tags=content.get('tags', []),
-                publish_date=None,  # 暂不支持定时发布
+                publish_date=None,  # 现在由任务队列控制定时
                 account_file=cookie_path,
                 thumbnail_path=content.get('cover')
             )

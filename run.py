@@ -1,8 +1,6 @@
 import os
 import sys
 from pathlib import Path
-from PyQt6.QtWidgets import QApplication
-
 # 将项目根目录添加到 Python 路径
 ROOT_DIR = Path(__file__).resolve().parent
 sys.path.append(str(ROOT_DIR))
@@ -21,7 +19,7 @@ if __name__ == "__main__":
         PathManager.ensure_project_structure()
         
         # 启动应用
-        main()
+        sys.exit(main())
     except Exception as e:
         print(f"程序启动失败：{str(e)}")
         sys.exit(1) 

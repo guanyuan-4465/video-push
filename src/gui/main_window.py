@@ -13,28 +13,49 @@ from playwright.async_api import async_playwright
 from src.core.controllers.upload_controller import UploadController
 from src.core.validators.config_validator import ConfigValidator
 from datetime import datetime, timedelta
+from PyQt6.QtCore import QTimer
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.config_manager = ConfigManager()
-        self.config_validator = ConfigValidator()
-        self.upload_controller = UploadController()
-        # 初始化平台相关的控件
+        self.setWindowTitle("社交媒体自动发布工具")  # 设置窗口标题
+        
+        # 延迟初始化控制器
+        self.upload_controller = None
+        self.config_manager = None
+        self.config_validator = None
+        
+        # 初始化UI
         self.platform_widgets = {
             'douyin': {},
             'xiaohongshu': {}
         }
-        self.init_ui()
-        # 加载配置到UI
-        self.load_config_to_ui()
         
-        # 初始化任务管理器
-        asyncio.run(self.upload_controller.initialize())
+        # 延迟加载
+        QTimer.singleShot(0, self._delayed_init)
+        
+        # 注册窗口关闭事件
+        self.closeEvent = self.handle_close
+        
+        # 添加定时刷新任务状态
+        self.refresh_timer = QTimer()
+        self.refresh_timer.timeout.connect(self.refresh_tasks)
+        self.refresh_timer.start(5000)  # 每5秒刷新一次
+        
+    def _delayed_init(self):
+        """延迟初始化"""
+        try:
+            self.config_manager = ConfigManager()
+            self.config_validator = ConfigValidator()
+            self.upload_controller = UploadController()
+            
+            self.init_ui()
+            self.load_config_to_ui()
+        except Exception as e:
+            logger.error(f"延迟初始化失败: {e}")
         
     def init_ui(self):
         """初始化UI"""
-        self.setWindowTitle('社交媒体自动发布工具')
         self.setGeometry(100, 100, 800, 600)
         
         # 创建中心部件
@@ -138,6 +159,16 @@ class MainWindow(QMainWindow):
         schedule_layout = QHBoxLayout(schedule_group)
         schedule_checkbox = QCheckBox("启用定时发布")
         schedule_layout.addWidget(schedule_checkbox)
+
+        # 添加时间选择器
+        schedule_time = QDateTimeEdit()
+        schedule_time.setDateTime(datetime.now() + timedelta(minutes=5))  # 默认5分钟后
+        schedule_time.setCalendarPopup(True)  # 允许弹出日历选择
+        schedule_time.setEnabled(False)  # 初始禁用
+        schedule_layout.addWidget(schedule_time)
+    
+        # 连接复选框状态变化
+        schedule_checkbox.stateChanged.connect(lambda state: schedule_time.setEnabled(state == 2))
         
         # 保存控件引用
         platform_key = "douyin" if platform == "抖音" else "xiaohongshu"
@@ -147,7 +178,8 @@ class MainWindow(QMainWindow):
             'cookie_button': cookie_button,
             'get_cookie_button': get_cookie_button,
             'update_cookie_button': update_cookie_button,
-            'schedule': schedule_checkbox
+            'schedule': schedule_checkbox,
+            'time_picker': schedule_time
         }
         
         # 设置按钮点击事件
@@ -379,25 +411,25 @@ class MainWindow(QMainWindow):
             # 处理每个启用的平台
             for platform in enabled_platforms:
                 widgets = self.platform_widgets[platform]
+                schedule_time = None
                 
                 if widgets['schedule'].isChecked():
-                    # 定时发布
                     schedule_time = widgets['time_picker'].dateTime().toPyDateTime()
-                    success = self.upload_controller.schedule_upload(
-                        platform=platform,
-                        content_dir=content_dir,
-                        schedule_time=schedule_time
-                    )
-                    if success:
+                
+                # 统一使用 upload_content 方法，根据 schedule_time 决定是否创建任务
+                success = asyncio.run(self.upload_controller.upload_content(
+                    platform=platform,
+                    content_dir=content_dir,
+                    schedule_time=schedule_time
+                ))
+                
+                if success:
+                    if schedule_time:
                         logger.info(f"已添加定时任务: {platform} - {schedule_time}")
                     else:
-                        QMessageBox.warning(self, "警告", f"添加定时任务失败：{platform}")
+                        logger.info(f"{platform}平台上传成功")
                 else:
-                    # 立即执行
-                    asyncio.run(self.upload_controller.upload_content(
-                        platform=platform,
-                        content_dir=content_dir
-                    ))
+                    QMessageBox.warning(self, "警告", f"操作失败：{platform}")
             
             # 刷新任务列表
             self.refresh_tasks()
@@ -636,15 +668,51 @@ class MainWindow(QMainWindow):
             
     def clear_completed_tasks(self):
         """清理已完成的任务"""
-        # TODO: 实现任务清理功能
-        pass
-        
-    def closeEvent(self, event):
-        """窗口关闭事件"""
         try:
-            # 停止任务管理器
-            asyncio.run(self.upload_controller.shutdown())
+            # 获取任务队列
+            task_queue = self.upload_controller.task_queue
+            if not task_queue:
+                logger.error("任务队列未初始化")
+                return
+            
+            # 清理任务
+            task_queue.clear_completed_tasks()
+            
+            # 刷新任务列表
+            self.refresh_tasks()
+            
+            QMessageBox.information(self, "成功", "已清理完成的任务")
+            
+        except Exception as e:
+            logger.error(f"清理任务失败: {e}")
+            QMessageBox.critical(self, "错误", f"清理任务失败: {str(e)}")
+        
+    def handle_close(self, event):
+        """处理窗口关闭事件"""
+        try:
+            # 停止任务处理进程
+            self.upload_controller.task_queue.stop()
             event.accept()
         except Exception as e:
-            logger.error(f"关闭任务管理器失败: {e}")
+            logger.error(f"关闭窗口时出错: {e}")
             event.accept()
+
+    def start_task_processing(self):
+        """启动任务处理"""
+        try:
+            # 确保控制器已初始化
+            if self.upload_controller is None:
+                logger.warning("等待控制器初始化...")
+                QTimer.singleShot(100, self.start_task_processing)  # 延迟重试
+                return
+            
+            if not hasattr(self.upload_controller, 'task_queue'):
+                logger.error("任务队列未正确初始化")
+                return
+            
+            # 启动任务队列处理
+            self.upload_controller.task_queue.start()
+            logger.info("任务处理已启动")
+            
+        except Exception as e:
+            logger.error(f"启动任务处理失败: {e}")
