@@ -1,15 +1,9 @@
 from pathlib import Path
 from sys import stdout
 from loguru import logger
-import os
+from src.utils.paths import PathManager
+import logging
 
-def get_logs_dir() -> Path:
-    """获取日志目录"""
-    # 获取项目根目录
-    root_dir = Path(__file__).resolve().parent.parent.parent
-    logs_dir = root_dir / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-    return logs_dir
 
 def log_formatter(record: dict) -> str:
     """
@@ -39,7 +33,7 @@ def create_logger(log_name: str, file_path: str):
     def filter_record(record):
         return record["extra"].get("business_name") == log_name
 
-    log_dir = get_logs_dir()
+    log_dir = PathManager.get_logs_dir()
     log_dir.mkdir(exist_ok=True)
     
     logger.add(
@@ -63,19 +57,29 @@ def setup_logger():
     log_format = "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
     
     # 设置日志文件
-    log_file = get_logs_dir() / "app.log"
+    log_file = PathManager.get_logs_dir() / "app.log"
     
     # 添加文件处理器
     logger.add(
         log_file,
         format=log_format,
-        rotation="10 MB",
+        rotation="500 MB",
         retention="10 days",
         encoding="utf-8"
     )
     
     # 添加控制台处理器
     logger.add(stdout, colorize=True, format=log_format)
+    
+    # 使用 logging 模块配置日志
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s | %(levelname)s | %(message)s',
+        handlers=[
+            logging.FileHandler(log_file),
+            logging.StreamHandler()
+        ]
+    )
     
     return logger
 

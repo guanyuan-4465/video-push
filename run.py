@@ -14,6 +14,7 @@ from src.gui.app import main
 if __name__ == "__main__":
     try:
         # 设置工作目录为项目根目录
+        ROOT_DIR = Path(__file__).resolve().parent
         os.chdir(str(ROOT_DIR))
         
         # 确保必要的目录结构存在
