@@ -76,19 +76,35 @@ class UploadController:
         """处理内容上传"""
         try:
             # 扫描内容
-            content = self._scan_content(content_dir)
-            if not content:
+            contents = self._scan_content(content_dir)
+            if not contents:
                 return False
 
-            # 创建任务（无论是否定时）
-            task = UploadTask.create(
-                platform=platform,
-                content_path=str(content_dir),
-                schedule_time=schedule_time or datetime.now()  # 如果不是定时，就立即执行
-            )
-            
-            # 添加到任务队列
-            return self.task_queue.add_task(task)
+            success = True
+            # 为每个内容创建独立的任务
+            for content in contents:
+                # 获取实际的内容目录（子目录）
+                sub_dir = Path(content.get('content_path', ''))
+                if not sub_dir.exists():
+                    logger.error(f"内容目录不存在: {sub_dir}")
+                    success = False
+                    continue
+
+                # 创建任务
+                task = UploadTask.create(
+                    platform=platform,
+                    content_path=str(sub_dir),  # 使用子目录路径
+                    schedule_time=schedule_time or datetime.now()
+                )
+                # 将扫描到的内容添加到任务中
+                task.content = content
+                
+                # 添加到任务队列
+                if not self.task_queue.add_task(task):
+                    logger.error(f"添加任务失败: {sub_dir}")
+                    success = False
+
+            return success
             
         except Exception as e:
             logger.error(f"创建上传任务失败: {e}")
@@ -106,16 +122,24 @@ class UploadController:
             
             # 检查是否为批量模式
             if batch_enabled:
-                logger.info(f"批量模式：扫描子目录 {content_dir}")
-                # 批量模式：扫描所有子目录
-                contents = []
+                logger.info(f"批量模式：扫描目录 {content_dir}")
+                
+                # 首先尝试查找子目录
                 sub_dirs = [d for d in content_dir.iterdir() if d.is_dir()]
                 
+                # 如果没有子目录，则将当前目录作为内容目录
                 if not sub_dirs:
-                    logger.error(f"批量模式下目录为空或没有子目录: {content_dir}")
-                    raise ValueError(f"批量模式下目录为空或没有子目录: {content_dir}")
+                    logger.info(f"未找到子目录，将当前目录作为内容目录: {content_dir}")
+                    try:
+                        content = self._scan_single_dir(content_dir)
+                        return [content] if content else []
+                    except Exception as e:
+                        logger.error(f"扫描当前目录失败: {e}")
+                        return []
                     
+                # 有子目录则扫描所有子目录
                 logger.info(f"找到 {len(sub_dirs)} 个子目录: {[d.name for d in sub_dirs]}")
+                contents = []
                 
                 for sub_dir in sub_dirs:
                     try:
@@ -167,7 +191,8 @@ class UploadController:
         content = {
             'title': title,
             'tags': tags,
-            'desc_file': str(desc_files[0])
+            'desc_file': str(desc_files[0]),
+            'content_path': str(directory)  # 添加目录路径
         }
         
         if video_files:

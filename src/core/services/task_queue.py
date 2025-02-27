@@ -279,25 +279,15 @@ class TaskQueue:
             if not cookie_path or not Path(cookie_path).exists():
                 raise ValueError(f"Cookie文件不存在: {cookie_path}")
                 
-            # 扫描内容目录
-            content_path = Path(task.content_path)
-            logger.info(f"开始扫描内容目录: {content_path}")
-            
-            if not content_path.exists():
-                raise ValueError(f"内容目录不存在: {content_path}")
-                
-            logger.info(f"目录内容: {[f.name for f in content_path.iterdir()]}")
-            
-            # 扫描内容
-            content = self._scan_content(content_path)
-            logger.info(f"扫描到的内容: {content}")  # 添加日志
+            # 如果任务已经包含内容信息，直接使用
+            content = task.content if task.content else self._scan_content(Path(task.content_path))
             if not content:
-                raise ValueError(f"无法扫描内容: {content_path}")
-                
+                raise ValueError(f"无法获取内容: {task.content_path}")
+            
             # 创建可序列化的任务数据
             task_data = UploadTaskData(
                 platform=task.platform,
-                content_path=str(content_path),  # 确保是字符串
+                content_path=str(task.content_path),  # 确保是字符串
                 cookie_path=str(cookie_path),    # 确保是字符串
                 content=content,
                 platform_config=platform_config  # 添加平台配置
