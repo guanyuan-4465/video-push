@@ -7,7 +7,7 @@ from src.utils.log import logger
 from pathlib import Path
 from src.config.base_config import ConfigManager
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict
 import asyncio
 
 class UploadController:
@@ -94,40 +94,95 @@ class UploadController:
             logger.error(f"创建上传任务失败: {e}")
             return False
 
-    def _scan_content(self, content_dir: Path) -> dict:
-        """扫描内容目录，返回内容信息"""
+    def _scan_content(self, content_dir: Path) -> List[Dict]:
+        """扫描内容目录，返回内容信息列表"""
         try:
-            # 检查目录是否存在
             if not content_dir.exists():
                 raise ValueError(f"目录不存在: {content_dir}")
             
-            # 查找视频文件
-            video_files = list(content_dir.glob("*.mp4"))
-            if not video_files:
-                raise ValueError(f"未找到视频文件")
+            # 重新获取最新的配置
+            batch_enabled = self.config_manager.config.batch_enabled
+            logger.info(f"当前批量模式状态: {batch_enabled}")
             
-            # 查找封面图片
-            cover_files = list(content_dir.glob("*.png"))
-            
-            # 查找描述文件
-            desc_files = list(content_dir.glob("*.txt"))
-            if not desc_files:
-                raise ValueError(f"未找到描述文件")
-            
-            # 读取描述文件
-            desc_content = desc_files[0].read_text(encoding='utf-8').strip()
-            title, *tags = desc_content.split('\n')
-            
-            return {
-                'video': str(video_files[0]),
-                'cover': str(cover_files[0]) if cover_files else None,
-                'title': title,
-                'tags': [tag.strip('#') for tag in tags if tag.strip()]
-            }
+            # 检查是否为批量模式
+            if batch_enabled:
+                logger.info(f"批量模式：扫描子目录 {content_dir}")
+                # 批量模式：扫描所有子目录
+                contents = []
+                sub_dirs = [d for d in content_dir.iterdir() if d.is_dir()]
+                
+                if not sub_dirs:
+                    logger.error(f"批量模式下目录为空或没有子目录: {content_dir}")
+                    raise ValueError(f"批量模式下目录为空或没有子目录: {content_dir}")
+                    
+                logger.info(f"找到 {len(sub_dirs)} 个子目录: {[d.name for d in sub_dirs]}")
+                
+                for sub_dir in sub_dirs:
+                    try:
+                        content = self._scan_single_dir(sub_dir)
+                        if content:
+                            contents.append(content)
+                            logger.info(f"成功扫描子目录: {sub_dir.name}")
+                    except Exception as e:
+                        logger.warning(f"扫描子目录 {sub_dir} 失败: {e}")
+                
+                if not contents:
+                    raise ValueError("没有找到有效的内容")
+                    
+                logger.info(f"批量模式共扫描到 {len(contents)} 个有效内容")
+                return contents
+            else:
+                # 单个模式：直接扫描目录
+                logger.info(f"单个模式：直接扫描目录 {content_dir}")
+                content = self._scan_single_dir(content_dir)
+                return [content] if content else []
             
         except Exception as e:
             logger.error(f"扫描内容失败: {e}")
-            return None
+            raise
+
+    def _scan_single_dir(self, directory: Path) -> Dict:
+        """扫描单个目录的内容"""
+        logger.info(f"扫描目录: {directory}")
+        
+        # 查找媒体文件
+        video_files = list(directory.glob("*.mp4"))
+        image_files = list(directory.glob("*.jpg")) + list(directory.glob("*.png"))
+        
+        # 查找描述文件
+        desc_files = list(directory.glob("*.txt"))
+        if not desc_files:
+            raise ValueError(f"未找到描述文件: {directory}")
+        
+        # 读取描述文件
+        with open(desc_files[0], 'r', encoding='utf-8') as f:
+            desc_lines = f.readlines()
+        
+        title = desc_lines[0].strip() if desc_lines else ""
+        tags = []
+        if len(desc_lines) > 1:
+            tags = [tag.strip() for tag in desc_lines[1:] if tag.strip().startswith('#')]
+        
+        # 构建内容信息
+        content = {
+            'title': title,
+            'tags': tags,
+            'desc_file': str(desc_files[0])
+        }
+        
+        if video_files:
+            content['type'] = 'video'
+            content['video'] = str(video_files[0])
+            logger.info(f"找到视频文件: {video_files[0].name}")
+        elif image_files:
+            content['type'] = 'image'
+            content['images'] = [str(img) for img in image_files]
+            logger.info(f"找到图片文件: {[img.name for img in image_files]}")
+        else:
+            raise ValueError(f"未找到媒体文件: {directory}")
+        
+        logger.info(f"成功扫描目录 {directory.name}: {content['type']}, 标题: {title}")
+        return content
 
     async def pause_task(self, task_id: str) -> bool:
         """暂停任务"""

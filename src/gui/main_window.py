@@ -13,7 +13,10 @@ from playwright.async_api import async_playwright
 from src.core.controllers.upload_controller import UploadController
 from src.core.validators.config_validator import ConfigValidator
 from datetime import datetime, timedelta
-from PyQt6.QtCore import QTimer
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal, pyqtSlot
+from typing import Optional
+from src.core.services.process_pool import get_process_pool
+import os
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -41,6 +44,13 @@ class MainWindow(QMainWindow):
         self.refresh_timer = QTimer()
         self.refresh_timer.timeout.connect(self.refresh_tasks)
         self.refresh_timer.start(5000)  # 每5秒刷新一次
+        
+        # 在MainWindow的__init__方法中添加:
+        pool = get_process_pool()
+        if pool:
+            logger.info("进程池已初始化")
+        else:
+            logger.warning("进程池未初始化，部分功能可能不可用")
         
     def _delayed_init(self):
         """延迟初始化"""
@@ -128,7 +138,7 @@ class MainWindow(QMainWindow):
         
         # Cookie管理组
         cookie_group = QWidget()
-        cookie_layout = QVBoxLayout(cookie_group)  # 改为垂直布局
+        cookie_layout = QVBoxLayout(cookie_group)
         
         # Cookie文件选择
         cookie_file_layout = QHBoxLayout()
@@ -137,6 +147,9 @@ class MainWindow(QMainWindow):
         cookie_file_layout.addWidget(cookie_edit)
         cookie_button = QPushButton("选择...")
         cookie_file_layout.addWidget(cookie_button)
+        
+        # 添加到Cookie管理组
+        cookie_layout.addLayout(cookie_file_layout)
         
         # Cookie操作按钮
         cookie_actions_layout = QHBoxLayout()
@@ -150,23 +163,27 @@ class MainWindow(QMainWindow):
         update_cookie_button.clicked.connect(lambda: self.update_platform_cookie(platform))
         cookie_actions_layout.addWidget(update_cookie_button)
         
-        # 添加到Cookie管理组
-        cookie_layout.addLayout(cookie_file_layout)
         cookie_layout.addLayout(cookie_actions_layout)
+        
+        # 发布地点设置
+        location_group = QWidget()
+        location_layout = QHBoxLayout(location_group)
+        location_layout.addWidget(QLabel("发布地点:"))
+        location_edit = QLineEdit()
+        location_layout.addWidget(location_edit)
         
         # 定时发布设置
         schedule_group = QWidget()
         schedule_layout = QHBoxLayout(schedule_group)
         schedule_checkbox = QCheckBox("启用定时发布")
         schedule_layout.addWidget(schedule_checkbox)
-
+        
         # 添加时间选择器
         schedule_time = QDateTimeEdit()
-        schedule_time.setDateTime(datetime.now() + timedelta(minutes=5))  # 默认5分钟后
-        schedule_time.setCalendarPopup(True)  # 允许弹出日历选择
+        schedule_time.setDateTime(datetime.now() + timedelta(minutes=5))
         schedule_time.setEnabled(False)  # 初始禁用
         schedule_layout.addWidget(schedule_time)
-    
+
         # 连接复选框状态变化
         schedule_checkbox.stateChanged.connect(lambda state: schedule_time.setEnabled(state == 2))
         
@@ -178,6 +195,7 @@ class MainWindow(QMainWindow):
             'cookie_button': cookie_button,
             'get_cookie_button': get_cookie_button,
             'update_cookie_button': update_cookie_button,
+            'location_edit': location_edit,
             'schedule': schedule_checkbox,
             'time_picker': schedule_time
         }
@@ -190,6 +208,7 @@ class MainWindow(QMainWindow):
         # 添加所有组件到布局
         layout.addWidget(enable_group)
         layout.addWidget(cookie_group)
+        layout.addWidget(location_group)
         layout.addWidget(schedule_group)
         layout.addStretch()
         
@@ -217,8 +236,8 @@ class MainWindow(QMainWindow):
                 # 检查目录结构
                 if self.batch_checkbox.isChecked():
                     # 批量模式：检查是否有子目录
-                    video_dirs = [d for d in dir_path.iterdir() if d.is_dir()]
-                    if not video_dirs:
+                    content_dirs = [d for d in dir_path.iterdir() if d.is_dir()]
+                    if not content_dirs:
                         reply = QMessageBox.question(
                             self,
                             "创建目录结构",
@@ -228,33 +247,59 @@ class MainWindow(QMainWindow):
                         
                         if reply == QMessageBox.Yes:
                             # 创建示例批量目录结构
-                            for i in range(1, 3):  # 创建两个示例目录
-                                example_dir = dir_path / f"video{i}"
-                                example_dir.mkdir(exist_ok=True)
-                                logger.info(f"创建示例目录：{example_dir}")
+                            # 视频示例
+                            video_dir = dir_path / "video_example"
+                            video_dir.mkdir(exist_ok=True)
+                            logger.info(f"创建视频示例目录：{video_dir}")
                             
+                            # 图文示例
+                            image_dir = dir_path / "image_example"
+                            image_dir.mkdir(exist_ok=True)
+                            logger.info(f"创建图文示例目录：{image_dir}")
+                                
                             QMessageBox.information(
                                 self,
                                 "提示",
-                                "已创建示例目录结构：\n"
-                                "video1/\n"
+                                "已创建示例目录结构：\n\n"
+                                "1. 视频内容目录结构：\n"
+                                "video_example/\n"
                                 "  - 视频文件 (video.mp4)\n"
-                                "  - 封面图片 (cover.png)\n"
-                                "  - 描述文件 (desc.txt)\n"
-                                "video2/\n"
-                                "  ..."
+                                "  - 封面图片 (cover.jpg/png)\n"
+                                "  - 描述文件 (desc.txt)\n\n"
+                                "2. 图文内容目录结构：\n"
+                                "image_example/\n"
+                                "  - 图片文件 (*.jpg/*.png)\n"
+                                "  - 描述文件 (desc.txt)"
                             )
                 else:
-                    # 单个发布模式：直接检查文件
+                    # 单个发布模式：检查文件
                     video_files = list(dir_path.glob("*.mp4"))
-                    if not video_files:
+                    image_files = list(dir_path.glob("*.jpg")) + list(dir_path.glob("*.png"))
+                    desc_files = list(dir_path.glob("*.txt"))
+                    
+                    # 只有当目录非空但缺少必要文件时才提示
+                    if any(dir_path.iterdir()) and not (video_files or image_files):
                         QMessageBox.information(
                             self,
                             "提示",
-                            "请在选择的目录中放置：\n"
-                            "- 视频文件 (video.mp4)\n"
-                            "- 封面图片 (cover.png)\n"
-                            "- 描述文件 (desc.txt)"
+                            "请确保目录中包含以下文件：\n\n"
+                            "1. 视频发布需要：\n"
+                            "  - 视频文件 (*.mp4)\n"
+                            "  - 封面图片 (*.jpg/*.png，可选)\n"
+                            "  - 描述文件 (desc.txt)\n\n"
+                            "2. 图文发布需要：\n"
+                            "  - 图片文件 (*.jpg/*.png)\n"
+                            "  - 描述文件 (desc.txt)"
+                        )
+                    elif (video_files or image_files) and not desc_files:
+                        # 只有当有媒体文件但缺少描述文件时才提示
+                        QMessageBox.warning(
+                            self,
+                            "提示",
+                            "缺少描述文件 (desc.txt)，请添加。\n"
+                            "描述文件格式：\n"
+                            "第一行：标题\n"
+                            "后续行：标签（每行一个，以#开头）"
                         )
                 
                 self.dir_edit.setText(str(dir_path))
@@ -303,10 +348,17 @@ class MainWindow(QMainWindow):
     def save_config(self):
         """保存配置"""
         try:
-            # 1. 从UI获取配置并更新到 GlobalConfig 对象
+            # 1. 检查配置管理器初始化状态
+            if not self.config_manager or not hasattr(self.config_manager, 'config'):
+                logger.error("配置管理器未正确初始化")
+                QMessageBox.critical(self, "错误", "配置管理器未初始化，请重启应用")
+                return False
+
+            # 2. 从UI获取配置并更新到 GlobalConfig 对象
             config = self.config_manager.config
             config.base_dir = Path(self.dir_edit.text())
             config.batch_enabled = self.batch_checkbox.isChecked()
+            logger.info(f"批量发布状态: {config.batch_enabled}")  # 添加日志
             
             # 更新平台配置
             for platform in ['douyin', 'xiaohongshu']:
@@ -314,17 +366,21 @@ class MainWindow(QMainWindow):
                 if widgets:
                     platform_config = getattr(config, platform)
                     platform_config.enabled = widgets['enabled_checkbox'].isChecked()
-                    platform_config.cookie_path = Path(widgets['cookie_edit'].text()) if widgets['cookie_edit'].text() else None
+                    platform_config.cookie_path = widgets['cookie_edit'].text() or ""
+                    platform_config.location = widgets['location_edit'].text() or ""
                     platform_config.schedule_enabled = widgets['schedule'].isChecked()
 
-            # 2. 使用 ConfigValidator 验证配置对象
+            # 3. 验证配置对象
             if not self.config_validator.validate_config(config):
                 QMessageBox.warning(self, "警告", "配置验证失败")
                 return False
 
-            # 3. 验证通过后，使用 ConfigManager 保存配置
-            self.config_manager.save_config()
-            logger.info("配置已保存")
+            # 4. 保存配置并验证保存结果
+            if not self.config_manager.save_config():
+                QMessageBox.warning(self, "警告", "配置保存失败")
+                return False
+
+            logger.info("配置已成功保存")
             QMessageBox.information(self, "成功", "配置保存成功！")
             return True
             
@@ -438,33 +494,70 @@ class MainWindow(QMainWindow):
             logger.error(f"上传失败: {e}")
             QMessageBox.critical(self, "错误", f"上传失败：{str(e)}")
             
-    async def get_platform_cookie(self, platform: str):
-        """获取平台Cookie"""
+    async def get_platform_cookie(self, platform_name):
+        """获取平台cookie"""
         try:
-            # 获取账号名称（这里需要实现）
-            account_name = await self._get_account_name()
-            if not account_name:
+            # 正确地将UI显示的平台名称转换为内部使用的平台键
+            platform_key = "douyin" if platform_name == "抖音" else "xiaohongshu"
+            
+            # 获取平台配置
+            widgets = self.platform_widgets.get(platform_key)
+            if not widgets:
+                QMessageBox.critical(self, "错误", f"未找到{platform_name}平台配置")
                 return
             
-            platform_key = self._get_platform_key(platform)
-            cookie_file = PathManager.get_cookie_path(platform_key, account_name)
-            
-            # 确保cookie目录存在
-            cookie_file.parent.mkdir(parents=True, exist_ok=True)
-            
-            success = await self.upload_controller.generate_cookie(
-                platform_key, 
-                str(cookie_file)
+            # 先询问用户输入账号名称
+            account_name, ok = QInputDialog.getText(
+                self, 
+                f"输入{platform_name}账号", 
+                "请输入账号名称（用于保存Cookie文件）:"
             )
             
-            if success:
-                self._update_cookie_ui(platform_key, cookie_file)
-                self._show_success_message(f"已成功获取{platform}账号 {account_name} 的Cookie")
-            else:
-                self._show_error_message("获取Cookie失败")
+            if not ok or not account_name:
+                logger.info("用户取消了Cookie获取操作")
+                return
+            
+            # 使用 PathManager 获取 cookie 路径
+            cookie_path = PathManager.get_cookie_path(platform_key, account_name)
+            
+            # 更新UI显示
+            widgets['cookie_edit'].setText(str(cookie_path))
+            
+            # 创建并启动工作线程
+            self.cookie_worker = CookieWorker(platform_key, str(cookie_path))
+            
+            # 连接信号
+            self.cookie_worker.progress.connect(lambda msg: logger.info(msg))
+            self.cookie_worker.finished.connect(
+                lambda success: self.on_cookie_generation_complete(success, platform_key)
+            )
+            
+            # 禁用按钮防止重复点击
+            widgets['get_cookie_button'].setEnabled(False)
+            widgets['get_cookie_button'].setText("获取中...")
+            
+            # 启动线程
+            self.cookie_worker.start()
             
         except Exception as e:
-            self._handle_error(f"获取{platform} Cookie失败", e)
+            logger.error(f"启动获取{platform_name} Cookie失败: {e}")
+            QMessageBox.critical(self, "错误", f"启动获取Cookie失败: {str(e)}")
+
+    @pyqtSlot(bool, str)
+    def on_cookie_generation_complete(self, success, platform_key):
+        """Cookie获取完成后的处理"""
+        widgets = self.platform_widgets.get(platform_key)
+        if not widgets:
+            return
+        
+        # 恢复按钮状态
+        widgets['get_cookie_button'].setEnabled(True)
+        widgets['get_cookie_button'].setText("获取Cookie")
+        
+        if success:
+            QMessageBox.information(self, "成功", f"成功获取{platform_key.capitalize()} Cookie")
+        else:
+            QMessageBox.warning(self, "警告", f"获取{platform_key.capitalize()} Cookie失败或被取消")
 
     def _get_platform_key(self, platform: str) -> str:
         """获取平台标识"""
@@ -474,32 +567,17 @@ class MainWindow(QMainWindow):
         }
         return platform_map.get(platform, platform.lower())
 
-    async def _get_account_name(self) -> str:
-        """获取账号名称"""
-        try:
-            # 使用 QInputDialog 获取用户输入
-            account_name, ok = QInputDialog.getText(
-                self,
-                "输入账号名称",
-                "请输入要保存的账号名称:",
-                QLineEdit.EchoMode.Normal
-            )
-            
-            if not ok or not account_name:
-                logger.info("用户取消输入账号名称")
-                return ""
-            
-            # 验证账号名称（可以添加更多验证规则）
-            if len(account_name) < 2:
-                self._show_error_message("账号名称太短")
-                return ""
-            
-            logger.info(f"用户输入账号名称: {account_name}")
-            return account_name
-            
-        except Exception as e:
-            self._handle_error("获取账号名称失败", e)
-            return ""
+    async def _get_account_name(self) -> Optional[str]:
+        """异步获取账号名称"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(
+            None, 
+            lambda: QInputDialog.getText(
+                self, 
+                "输入账号", 
+                "请输入账号名称（用于保存Cookie）:"
+            )[0]
+        )
 
     def update_platform_cookie(self, platform: str):
         """更新平台Cookie"""
@@ -716,3 +794,136 @@ class MainWindow(QMainWindow):
             
         except Exception as e:
             logger.error(f"启动任务处理失败: {e}")
+
+    def get_cookie(self, platform: str):
+        """获取平台Cookie的非异步入口方法"""
+        try:
+            # 确保从正确的位置导入PathManager
+            from src.utils.paths import PathManager
+            
+            # 获取账号名称
+            account_name, ok = QInputDialog.getText(
+                self, 
+                "输入账号", 
+                "请输入账号名称（用于保存Cookie）:"
+            )
+            
+            if not ok or not account_name:
+                return False
+            
+            # 获取平台标识
+            platform_key = self._get_platform_key(platform)
+            
+            # 生成cookie文件路径
+            cookie_file = PathManager.get_cookie_path(platform_key, account_name)
+            
+            # 确保目录存在
+            cookie_file.parent.mkdir(parents=True, exist_ok=True)
+            
+            # 创建一个新的事件循环
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            try:
+                # 直接调用cookie生成函数
+                if platform_key == "douyin":
+                    from src.core.uploaders.douyin import douyin_cookie_gen
+                    success = loop.run_until_complete(douyin_cookie_gen(str(cookie_file)))
+                else:
+                    from src.core.uploaders.xiaohongshu import xhs_cookie_gen
+                    success = loop.run_until_complete(xhs_cookie_gen(str(cookie_file)))
+                    
+                if success:
+                    # 更新UI
+                    self._update_cookie_ui(platform_key, cookie_file)
+                    QMessageBox.information(self, "成功", f"已成功获取{platform}账号 {account_name} 的Cookie")
+                else:
+                    QMessageBox.warning(self, "警告", f"获取{platform} Cookie失败")
+                    
+                return success
+            finally:
+                # 关闭事件循环
+                loop.close()
+                
+        except Exception as e:
+            logger.error(f"获取{platform} Cookie失败: {e}")
+            QMessageBox.critical(self, "错误", f"获取Cookie失败: {str(e)}")
+            return False
+
+# 修改CookieWorker类，改进异常处理和监控逻辑
+class CookieWorker(QThread):
+    # 定义信号
+    finished = pyqtSignal(bool)
+    progress = pyqtSignal(str)
+    
+    def __init__(self, platform, cookie_path):
+        super().__init__()
+        self.platform = platform
+        self.cookie_path = cookie_path
+        
+    def run(self):
+        """在单独的线程中运行"""
+        try:
+            # 创建新的事件循环
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            
+            # 确保目录存在
+            cookie_dir = os.path.dirname(self.cookie_path)
+            os.makedirs(cookie_dir, exist_ok=True)
+            
+            self.progress.emit(f"开始获取{self.platform} Cookie，请在弹出的浏览器中登录")
+            
+            # 定义一个包装函数来处理超时和取消
+            async def run_with_timeout(coro, timeout=360):
+                try:
+                    return await asyncio.wait_for(coro, timeout=timeout)
+                except asyncio.TimeoutError:
+                    self.progress.emit("操作超时")
+                    return False
+                except asyncio.CancelledError:
+                    self.progress.emit("操作被取消")
+                    return False
+                except Exception as e:
+                    if "has been closed" in str(e):
+                        self.progress.emit("浏览器已被关闭")
+                    else:
+                        self.progress.emit(f"发生错误: {str(e)}")
+                    return False
+            
+            # 根据平台选择不同的cookie生成器
+            if self.platform == 'douyin':
+                from src.core.uploaders.douyin import douyin_cookie_gen
+                result = loop.run_until_complete(
+                    run_with_timeout(douyin_cookie_gen(self.cookie_path))
+                )
+            elif self.platform == 'xiaohongshu':
+                from src.core.uploaders.xiaohongshu import xhs_cookie_gen
+                result = loop.run_until_complete(
+                    run_with_timeout(xhs_cookie_gen(self.cookie_path))
+                )
+            else:
+                self.progress.emit(f"不支持的平台: {self.platform}")
+                result = False
+                
+            # 发送结果信号
+            self.finished.emit(result)
+            
+        except Exception as e:
+            import traceback
+            logger.error(f"获取{self.platform} Cookie失败: {e}\n{traceback.format_exc()}")
+            self.progress.emit(f"获取Cookie时发生错误: {e}")
+            self.finished.emit(False)
+        finally:
+            try:
+                # 确保事件循环被安全关闭
+                pending_tasks = asyncio.all_tasks(loop)
+                for task in pending_tasks:
+                    task.cancel()
+                
+                if not loop.is_closed():
+                    # 尝试运行一次loop以处理取消的任务
+                    loop.run_until_complete(asyncio.sleep(0))
+                    loop.close()
+            except Exception as e:
+                logger.error(f"清理事件循环时出错: {e}")

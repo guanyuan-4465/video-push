@@ -1,5 +1,5 @@
 from queue import Queue, Empty
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from src.core.services.process_pool import get_process_pool
 from datetime import datetime
 from typing import Optional, Dict, List, Callable
@@ -9,8 +9,9 @@ from src.utils.log import logger
 import json
 from pathlib import Path
 import time
-from concurrent.futures import TimeoutError
+from concurrent.futures import TimeoutError, ProcessPoolExecutor
 import threading
+from PyQt6.QtCore import QMetaObject, Qt, Q_ARG, QVariant
 
 @dataclass
 class UploadTask:
@@ -24,41 +25,87 @@ class UploadTask:
     error: Optional[str] = None
     retry_count: int = 0
     max_retries: int = 3
+    content: Optional[Dict] = None
+    content_type: str = "video"  # 新增：内容类型标识
     
     @classmethod
     def create(cls, platform: str, content_path: str, schedule_time: Optional[datetime] = None) -> 'UploadTask':
         """创建新任务"""
-        # 如果没有指定计划时间，则立即执行
-        if schedule_time is None:
-            schedule_time = datetime.now()
-            
-        return cls(
+        task = cls(
             id=str(uuid.uuid4()),
             platform=platform,
             content_path=content_path,
-            schedule_time=schedule_time,
-            created_at=datetime.now()
+            schedule_time=schedule_time or datetime.now()
         )
+        # 根据内容路径判断内容类型
+        content_path = Path(content_path)
+        if list(content_path.glob("*.mp4")):
+            task.content_type = "video"
+        elif list(content_path.glob("*.jpg")) or list(content_path.glob("*.png")):
+            task.content_type = "image"
+        return task
 
     def can_retry(self) -> bool:
         return self.status == 'failed' and self.retry_count < self.max_retries
 
 @dataclass
 class UploadTaskData:
-    """可序列化的任务数据"""
+    """上传任务数据"""
     platform: str
     content_path: str
     cookie_path: str
-    content: dict
+    content: Optional[Dict] = None
+    title: str = ""
+    thumbnail_path: Optional[str] = None
+    image_paths: List[str] = field(default_factory=list)  # 新增：支持多图片路径
+    tags: List[str] = field(default_factory=list)
+    schedule_time: Optional[datetime] = None
+    content_type: str = "video"  # 新增：内容类型标识
+    platform_config: Optional[Dict] = None  # 添加平台配置字段
+    
+    def to_dict(self) -> Dict:
+        """转换为字典"""
+        return {
+            'platform': self.platform,
+            'content_path': self.content_path,
+            'cookie_path': self.cookie_path,
+            'content': self.content,
+            'title': self.title,
+            'thumbnail_path': self.thumbnail_path,
+            'image_paths': self.image_paths,  # 新增
+            'tags': self.tags,
+            'schedule_time': self.schedule_time.isoformat() if self.schedule_time else None,
+            'content_type': self.content_type,  # 新增
+            'platform_config': self.platform_config  # 添加到字典转换中
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict):
+        """从字典创建实例"""
+        if 'schedule_time' in data and data['schedule_time']:
+            data['schedule_time'] = datetime.fromisoformat(data['schedule_time'])
+        return cls(**data)
 
 class TaskQueue:
     """任务队列管理"""
     def __init__(self):
-        self.task_queue = Queue()  # 普通队列即可
+        self.task_queue = Queue()
         self.tasks = {}
         self._running = False
         self.status_callbacks = []
-        self._load_tasks()  # 加载持久化的任务
+        self.platform_last_exec = {
+            'douyin': None,
+            'xiaohongshu': None
+        }  # 记录每个平台最后执行时间
+        self.platform_intervals = {
+            'douyin': 300,  # 抖音发布间隔5分钟
+            'xiaohongshu': 300  # 小红书发布间隔5分钟
+        }  # 平台发布间隔（秒）
+        self._load_tasks()
+        
+        self.process_pool = get_process_pool()
+        if self.process_pool is None:
+            logger.warning("任务队列无法获取进程池，将使用线程池替代")
         
     def _save_tasks(self):
         """保存任务到文件"""
@@ -117,91 +164,103 @@ class TaskQueue:
         if self._running:
             return
         
-        try:
-            self._running = True
-            logger.info("任务队列处理器启动中...")
-            
-            # 使用新线程处理任务
-            self._process_thread = threading.Thread(target=self._process_tasks)
-            self._process_thread.daemon = True  # 设为守护线程
-            self._process_thread.start()
-            
-        except Exception as e:
-            self._running = False
-            logger.error(f"任务队列启动失败: {e}")
+        self._running = True
+        logger.info("任务队列处理器启动中...")
+        
+        # 创建并启动任务处理线程
+        def run_tasks():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(self._process_tasks())
+        
+        self.task_thread = threading.Thread(target=run_tasks)
+        self.task_thread.daemon = True
+        self.task_thread.start()
         
     def stop(self):
         """停止任务处理"""
         self._running = False
         logger.info("任务队列处理器已停止")
         
-    def _process_tasks(self):
+    async def _process_tasks(self):
         """处理任务队列"""
         while self._running:
             try:
-                # 检查所有任务的状态
                 current_time = datetime.now()
-                ready_tasks = []
+                # 按平台分组获取就绪任务
+                platform_tasks = {
+                    'douyin': [],
+                    'xiaohongshu': []
+                }
                 
-                # 遍历所有任务检查状态
+                # 遍历所有任务并按平台分组
                 for task_id, task in list(self.tasks.items()):
                     if task.status == 'pending' and current_time >= task.schedule_time:
+                        platform_tasks[task.platform].append(task)
                         task.status = 'ready'
-                        ready_tasks.append(task)
                         self._notify_status_change(task.id, task.status)
                     elif task.status == 'ready':
-                        ready_tasks.append(task)
+                        platform_tasks[task.platform].append(task)
 
-                # 处理就绪的任务
-                if ready_tasks:
-                    logger.info(f"发现 {len(ready_tasks)} 个待处理任务")
-                    process_pool = get_process_pool()
-                    if not process_pool:
-                        logger.error("进程池未初始化")
-                        time.sleep(5)
+                # 并行处理不同平台的任务
+                futures = []
+                
+                # 对每个平台单独处理
+                for platform, tasks in platform_tasks.items():
+                    if not tasks:
                         continue
+                        
+                    # 检查该平台的上次执行时间
+                    last_exec = self.platform_last_exec.get(platform)
+                    if last_exec:
+                        elapsed = (current_time - last_exec).total_seconds()
+                        if elapsed < self.platform_intervals[platform]:
+                            logger.info(f"{platform} 平台任务间隔未到 ({elapsed:.0f}/{self.platform_intervals[platform]}秒)")
+                            continue
+                    
+                    # 获取该平台的第一个任务
+                    task = tasks[0]
+                    task.status = 'running'
+                    self._notify_status_change(task.id, task.status)
+                    logger.info(f"开始处理 {platform} 平台任务: {task.id}")
+                    
+                    # 提交任务到进程池
+                    future = self._submit_task(task)
+                    futures.append((task, future, platform))
 
-                    for task in ready_tasks[:3]:  # 每次最多处理3个任务
+                # 等待当前批次的任务完成
+                if futures:
+                    for task, future, platform in futures:
                         try:
-                            task.status = 'running'
-                            self._notify_status_change(task.id, task.status)
-                            logger.info(f"开始处理任务: {task.id} - {task.platform}")
-                            
-                            # 提交任务到进程池
-                            future = self._submit_task(task)
-                            
-                            # 等待任务完成
-                            try:
-                                success = future.get(timeout=300)  # 5分钟超时
-                                task.status = 'completed' if success else 'failed'
-                                if not success:
-                                    task.error = "上传失败"
-                            except Exception as e:
-                                task.status = 'failed'
-                                task.error = str(e)
-                                logger.error(f"任务执行失败: {e}")
-                                
-                            self._notify_status_change(task.id, task.status)
-                            self._save_tasks()
-                            
+                            success = await asyncio.get_event_loop().run_in_executor(
+                                None, future.result, 300
+                            )
+                            task.status = 'completed' if success else 'failed'
+                            if success:
+                                # 仅更新成功完成任务的平台最后执行时间
+                                self.platform_last_exec[platform] = datetime.now()
+                                logger.info(f"{platform} 平台任务完成，更新最后执行时间")
+                            else:
+                                task.error = "上传失败"
                         except Exception as e:
-                            logger.error(f"处理任务 {task.id} 时出错: {e}")
                             task.status = 'failed'
                             task.error = str(e)
+                            logger.error(f"任务执行失败: {e}")
+                        finally:
                             self._notify_status_change(task.id, task.status)
                             self._save_tasks()
 
-                time.sleep(5)  # 每5秒检查一次任务状态
+                # 短暂休眠避免CPU占用过高
+                await asyncio.sleep(1)
                 
             except Exception as e:
                 logger.error(f"任务处理循环出错: {e}")
-                time.sleep(5)
+                await asyncio.sleep(5)
                 
     def _submit_task(self, task: UploadTask):
         """提交任务到进程池"""
         try:
-            process_pool = get_process_pool()
-            if not process_pool:
+            if not self.process_pool:
                 raise RuntimeError("进程池未初始化")
                 
             # 获取平台配置
@@ -211,10 +270,12 @@ class TaskQueue:
                 raise ValueError("无法获取配置")
                 
             platform_config = config.get_platform_config(task.platform)
+            logger.info(f"任务提交时的平台配置: {platform_config}")  # 添加日志
             if not platform_config:
                 raise ValueError(f"未找到平台配置: {task.platform}")
                 
             cookie_path = platform_config.get('cookie_path')
+            logger.info(f"获取到的 cookie_path: {cookie_path}")  # 添加日志
             if not cookie_path or not Path(cookie_path).exists():
                 raise ValueError(f"Cookie文件不存在: {cookie_path}")
                 
@@ -222,39 +283,42 @@ class TaskQueue:
             content_path = Path(task.content_path)
             logger.info(f"开始扫描内容目录: {content_path}")
             
-            # 检查目录是否存在
             if not content_path.exists():
                 raise ValueError(f"内容目录不存在: {content_path}")
                 
-            # 列出目录内容
             logger.info(f"目录内容: {[f.name for f in content_path.iterdir()]}")
             
             # 扫描内容
             content = self._scan_content(content_path)
+            logger.info(f"扫描到的内容: {content}")  # 添加日志
             if not content:
                 raise ValueError(f"无法扫描内容: {content_path}")
                 
             # 创建可序列化的任务数据
             task_data = UploadTaskData(
                 platform=task.platform,
-                content_path=task.content_path,
-                cookie_path=cookie_path,
-                content=content
+                content_path=str(content_path),  # 确保是字符串
+                cookie_path=str(cookie_path),    # 确保是字符串
+                content=content,
+                platform_config=platform_config  # 添加平台配置
             )
-            
+            logger.info(f"创建的任务数据: {task_data.to_dict()}")  # 添加日志
             # 提交任务到进程池
-            return process_pool.apply_async(
-                self._execute_task_in_process,
-                (task_data,)
-            )
+            logger.info(f"提交任务到进程池: {task.id}")
+            return self.process_pool.submit(self._execute_task_in_process, task_data.to_dict())
             
         except Exception as e:
             logger.error(f"提交任务失败: {e}")
             raise
 
-    def _execute_task_in_process(self, task_data: UploadTaskData) -> bool:
+    @staticmethod
+    def _execute_task_in_process(task_data_dict):
         """在独立进程中执行任务"""
         try:
+            # 从字典重建任务数据
+            from src.core.services.task_queue import UploadTaskData
+            task_data = UploadTaskData.from_dict(task_data_dict)
+            
             # 验证任务数据
             if not task_data.platform or not task_data.content_path or not task_data.cookie_path:
                 raise ValueError("任务数据不完整")
@@ -265,7 +329,10 @@ class TaskQueue:
             if not Path(task_data.cookie_path).exists():
                 raise ValueError(f"Cookie文件不存在: {task_data.cookie_path}")
             
+            # 导入必要的模块
             from src.core.services.upload_service import UploadService
+            import asyncio
+            from playwright.async_api import async_playwright
             
             # 创建上传服务
             upload_service = UploadService()
@@ -278,12 +345,26 @@ class TaskQueue:
                 from src.core.uploaders.xiaohongshu import XiaohongshuUploader
                 upload_service.register_uploader('xiaohongshu', XiaohongshuUploader)
             
-            # 执行上传
-            return asyncio.run(upload_service.upload_content(
-                platform=task_data.platform,
-                content=task_data.content,
-                cookie_path=task_data.cookie_path
-            ))
+            # 定义异步上传函数
+            async def run_upload():
+                try:
+                    # 在进程内创建 playwright 对象
+                    async with async_playwright() as playwright:
+                        # 执行上传
+                        result = await upload_service.upload_content(
+                            platform=task_data.platform,
+                            content=task_data.content,
+                            cookie_path=task_data.cookie_path,
+                            platform_config=task_data.platform_config,  # 添加这行
+                            playwright=playwright  # 传递 playwright 对象
+                        )
+                        return result
+                except Exception as e:
+                    logger.error(f"上传过程中出错: {e}")
+                    return False
+            
+            # 运行异步函数
+            return asyncio.run(run_upload())
             
         except Exception as e:
             logger.error(f"任务执行失败: {e}")
@@ -338,38 +419,59 @@ class TaskQueue:
     def _notify_status_change(self, task_id: str, new_status: str):
         """通知状态变更"""
         try:
-            logger.info(f"任务 {task_id} 状态变更为: {new_status}")
+            task = self.tasks.get(task_id)
+            if not task:
+                logger.warning(f"未找到任务 {task_id}")
+                return
+
+            # 安全地获取内容类型
+            content_type = "未知"
+            if hasattr(task, 'content') and task.content:
+                content_type = "视频" if task.content.get('video') else "图文"
+            elif hasattr(task, 'content_type'):
+                content_type = task.content_type
+
+            status_desc = {
+                'pending': '等待中',
+                'ready': '准备上传',
+                'running': f'正在上传{content_type}内容',
+                'completed': f'{content_type}上传完成',
+                'failed': f'{content_type}上传失败'
+            }.get(new_status, new_status)
+
+            logger.info(f"任务 {task_id} ({content_type}) 状态变更为: {status_desc}")
+            
+            # 如果是失败状态，记录错误信息
+            if new_status == 'failed' and hasattr(task, 'error'):
+                logger.error(f"任务失败原因: {task.error}")
+
+            # 通知所有回调
             for callback in self.status_callbacks:
                 try:
                     callback(task_id, new_status)
                 except Exception as e:
                     logger.error(f"状态通知回调执行失败: {e}")
+                
         except Exception as e:
             logger.error(f"通知状态变更失败: {e}")
 
     def _scan_content(self, content_path: Path) -> dict:
-        """扫描内容目录，获取视频、封面和描述文件"""
+        """扫描内容目录，获取视频/图片和描述文件"""
         try:
             if not content_path.exists():
                 raise ValueError(f"内容目录不存在: {content_path}")
             
-            # 查找视频文件
+            # 查找媒体文件
             video_files = list(content_path.glob("*.mp4"))
-            if not video_files:
-                raise ValueError(f"未找到视频文件: {content_path}")
+            image_files = list(content_path.glob("*.jpg")) + list(content_path.glob("*.png"))
             
-            # 查找封面图片
-            cover_files = list(content_path.glob("*.jpg")) + list(content_path.glob("*.png"))
-            if not cover_files:
-                raise ValueError(f"未找到封面图片: {content_path}")
-            
-            # 查找描述文件 - 更灵活地查找 .txt 文件
+            # 查找描述文件
             txt_files = list(content_path.glob("*.txt"))
             if not txt_files:
                 raise ValueError(f"未找到描述文件: {content_path}")
             
             # 读取描述内容
-            desc_file = txt_files[0]  # 使用找到的第一个 .txt 文件
+            desc_file = txt_files[0]
             logger.info(f"使用描述文件: {desc_file}")
             
             try:
@@ -380,7 +482,6 @@ class TaskQueue:
                     if len(desc_lines) > 1:
                         tags = [tag.strip() for tag in desc_lines[1].split("#") if tag.strip()]
             except UnicodeDecodeError:
-                # 如果 UTF-8 解码失败，尝试其他编码
                 with open(desc_file, "r", encoding="gbk") as f:
                     desc_lines = f.readlines()
                     title = desc_lines[0].strip() if desc_lines else ""
@@ -388,19 +489,47 @@ class TaskQueue:
                     if len(desc_lines) > 1:
                         tags = [tag.strip() for tag in desc_lines[1].split("#") if tag.strip()]
             
-            # 记录找到的文件信息
-            video_file = video_files[0]
-            cover_file = cover_files[0]
-            logger.info(f"找到文件: 视频={video_file.name}, 封面={cover_file.name}, 描述={desc_file.name}")
-            
-            return {
-                "video": str(video_file),
-                "cover": str(cover_file),
+            # 构建返回内容
+            content = {
                 "title": title,
                 "tags": tags,
-                "desc_file": str(desc_file)  # 添加描述文件路径
+                "desc_file": str(desc_file)
             }
+            
+            # 根据文件类型构建不同的内容
+            if video_files:
+                # 视频模式
+                content["video"] = str(video_files[0])
+                # 查找对应的封面图片
+                cover_files = [f for f in image_files if f.stem == video_files[0].stem]
+                if cover_files:
+                    content["cover"] = str(cover_files[0])
+                logger.info(f"找到视频文件: 视频={video_files[0].name}, " + 
+                           f"封面={cover_files[0].name if cover_files else '无'}")
+            elif image_files:
+                # 图文模式
+                content["images"] = [str(f) for f in image_files]
+                logger.info(f"找到图片文件: {[f.name for f in image_files]}")
+            else:
+                raise ValueError(f"未找到媒体文件(视频或图片): {content_path}")
+            
+            return content
             
         except Exception as e:
             logger.error(f"扫描内容失败: {e}")
             return None
+
+    def _execute_task_in_main_thread(self, task_data):
+        """在主线程中执行任务，避免Qt线程问题"""
+        # 检查是否存在主窗口实例
+        if hasattr(self, 'main_window') and self.main_window:
+            # 使用Qt的跨线程调用机制
+            QMetaObject.invokeMethod(
+                self.main_window,
+                "handle_task",
+                Qt.ConnectionType.QueuedConnection,
+                Q_ARG(QVariant, task_data)
+            )
+        else:
+            # 如果没有主窗口，则直接在当前线程执行
+            self._execute_task(task_data)

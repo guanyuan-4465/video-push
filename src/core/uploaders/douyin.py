@@ -13,56 +13,60 @@ from src.core.uploaders.base import BaseUploader
 # 将函数移到类外部，作为独立函数
 async def douyin_cookie_gen(cookie_path: str) -> bool:
     """使用 playwright 获取抖音 cookie"""
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=False)
-        context = await browser.new_context()
-        page = await context.new_page()
-        
-        try:
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=False)
+            context = await browser.new_context()
+            page = await context.new_page()
+            
             # 访问登录页面
             await page.goto("https://creator.douyin.com/")
             logger.info("请使用抖音APP扫码登录...")
             
             # 等待登录成功后跳转
-            success = False
-            timeout = 300  # 5分钟超时
-            start_time = asyncio.get_event_loop().time()
-            
-            while not success and (asyncio.get_event_loop().time() - start_time) < timeout:
-                if page.url.startswith("https://creator.douyin.com/creator-micro/home"):
-                    success = True
-                    break
-                await asyncio.sleep(1)
-            
-            if not success:
-                raise TimeoutError("登录超时，请重试")
-            
-            # 保存 cookies
-            await context.storage_state(path=cookie_path)
-            logger.info(f"Cookie 已保存到: {cookie_path}")
-            
-            # 验证 cookie
-            await page.goto("https://creator.douyin.com/creator-micro/content/upload")
-            if "login" in page.url:
-                raise Exception("Cookie 验证失败")
+            try:
+                # 使用显式等待而不是循环，简化代码
+                await page.wait_for_url(
+                    "https://creator.douyin.com/creator-micro/home",
+                    timeout=300000  # 5分钟超时
+                )
+                logger.info("检测到登录成功")
                 
-            logger.success("Cookie 获取并验证成功！")
-            return True
-            
-        except Exception as e:
-            logger.error(f"获取 Cookie 失败: {str(e)}")
-            if os.path.exists(cookie_path):
+                # 保存 cookies
+                await context.storage_state(path=cookie_path)
+                logger.info(f"Cookie 已保存到: {cookie_path}")
+                
+                # 验证 cookie
+                await page.goto("https://creator.douyin.com/creator-micro/content/upload")
+                if "login" in page.url:
+                    raise Exception("Cookie 验证失败")
+                    
+                logger.info("Cookie 获取并验证成功！")
+                return True
+                
+            except Exception as e:
+                # 专门处理页面关闭/超时错误
+                if "Target page, context or browser has been closed" in str(e):
+                    logger.warning("浏览器已关闭，Cookie获取已取消")
+                elif "Timeout" in str(e):
+                    logger.warning("登录超时，请重试")
+                else:
+                    logger.error(f"登录过程中出错: {str(e)}")
+                return False
+                
+    except Exception as e:
+        logger.error(f"获取 Cookie 失败: {str(e)}")
+        if os.path.exists(cookie_path):
+            try:
                 os.remove(cookie_path)
-            return False
-            
-        finally:
-            await context.close()
-            await browser.close()
+            except Exception:
+                pass
+        return False
 
 class DouyinUploader(BaseUploader):
-    def __init__(self, title, file_path, tags, publish_date, account_file, thumbnail_path=None):
-        super().__init__(title, file_path, tags, publish_date, account_file, thumbnail_path)
-        self.file_type = self._get_file_type()
+    def __init__(self, title, file_path, tags, publish_date, account_file, thumbnail_path=None, location=None):
+        super().__init__(title, file_path, tags, publish_date, account_file, thumbnail_path, location)
+        self.file_type = self._get_file_type()  # 使用方法而不是直接判断
 
     def _get_file_type(self):
         """判断文件类型"""
@@ -128,7 +132,7 @@ class DouyinUploader(BaseUploader):
                 
                 # 保存cookie
                 await context.storage_state(path=self.account_file)
-                logger.info("登录成功，正在保存Cookie...")
+                logger.debug("登录成功，正在保存Cookie...")
                 
                 # 验证cookie
                 await page.goto("https://creator.douyin.com/creator-micro/content/upload")
@@ -136,7 +140,7 @@ class DouyinUploader(BaseUploader):
                     await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload", timeout=5000)
                     if await page.get_by_text('手机号登录').count():
                         raise Exception("Cookie验证失败")
-                    logger.success("Cookie获取并验证成功！")
+                    logger.info("Cookie获取并验证成功！")
                     return True
                 except Exception as e:
                     raise Exception(f"Cookie验证失败: {str(e)}")
@@ -162,14 +166,12 @@ class DouyinUploader(BaseUploader):
             logger.info(f'[+]正在上传-------{self.title}')
             
             # 等待页面加载完成
-            await page.wait_for_load_state("networkidle")
+            await page.wait_for_load_state("load")
             await asyncio.sleep(random.uniform(0.1, 0.5))
+            logger.info('[+]页面加载完成')
             
             # 根据文件类型选择上传模式
-            if self.file_type == "video":
-                await self._select_video_mode(page)
-            else:
-                await self._select_image_mode(page)
+            await self._select_upload_mode(page)
             
             # 上传文件
             await self._upload_file(page)
@@ -181,8 +183,10 @@ class DouyinUploader(BaseUploader):
             if self.thumbnail_path:
                 await self.set_thumbnail(page, self.thumbnail_path)
             
-            # 设置地区
-            await self.set_location(page)
+            # 如果配置了地点，则设置地点
+            if self.location:
+                await self.set_location(page, self.location)
+                logger.info(f"已设置发布地点: {self.location}")
             
             # 发布
             await self._publish(page, context)
@@ -190,7 +194,7 @@ class DouyinUploader(BaseUploader):
             return True
             
         except Exception as e:
-            logger.error(f"上传失败: {str(e)}")
+            logger.error(f"抖音上传失败: {e}")
             return False
             
         finally:
@@ -199,40 +203,52 @@ class DouyinUploader(BaseUploader):
             if browser:
                 await browser.close()
 
-    async def _select_video_mode(self, page: Page):
-        """选择视频上传模式"""
+    async def _select_upload_mode(self, page: Page):
+        """选择上传模式"""
         try:
-            # 等待上传按钮出现并点击
-            upload_button = page.locator('text=上传视频')
-            await upload_button.click()
-            logger.info('  [-] 已选择视频上传模式')
+            # 1. 获取文件类型并选择对应模式
+            file_type = self._get_file_type()
+            mode_text = "发布视频" if file_type == "video" else "发布图文"
+            logger.info(f'  [-] 文件类型: {file_type}, 选择模式: {mode_text}')
+            
+            # 2. 点击对应的模式
+            await page.locator(f'text={mode_text}').click()
+            await asyncio.sleep(random.uniform(1.0, 1.5))
+            
+            # 3. 在激活的面板中定位上传区域
+            upload_area = page.locator('div[role="tab-panel"][aria-hidden="false"] div[class*="container-drag-info-Tl0RGH"]')
+            await upload_area.wait_for(state="visible")
+            await upload_area.click()
+            logger.info(f'  [-] 已点击{mode_text}上传区域')
+            
         except Exception as e:
-            logger.error(f"选择视频模式失败: {str(e)}")
-            raise
-
-    async def _select_image_mode(self, page: Page):
-        """选择图文上传模式"""
-        try:
-            # 等待上传按钮出现并点击
-            upload_button = page.locator('text=发布图文')
-            await upload_button.click()
-            logger.info('  [-] 已选择图文上传模式')
-        except Exception as e:
-            logger.error(f"选择图文模式失败: {str(e)}")
+            logger.error(f"选择上传模式失败: {str(e)}")
             raise
 
     async def _upload_file(self, page: Page):
         """上传文件"""
         try:
-            # 等待文件选择器出现
-            file_input = page.locator('input[type="file"]')
-            await file_input.set_input_files(self.file_path)
-            logger.info('  [-] 文件上传中...')
+            # 根据文件类型选择对应的文件上传输入框
+            file_type = self._get_file_type()
+            if file_type == "video":
+                # 视频上传输入框
+                file_input = page.locator('div[role="tab-panel"][aria-hidden="false"] input[accept*="video"]')
+            else:
+                # 图片上传输入框
+                file_input = page.locator('div[role="tab-panel"][aria-hidden="false"] input[accept*="image"]')
             
-            # 等待上传完成
-            await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(random.uniform(1, 2))
-            logger.success('  [-] 文件上传完成')
+            await file_input.wait_for(state="attached")
+            
+            if file_type == "video":
+                await file_input.set_input_files(self.file_path)
+            else:
+                # 对于图片上传，可能有多个文件
+                if isinstance(self.file_path, list):
+                    await file_input.set_input_files(self.file_path)
+                else:
+                    await file_input.set_input_files([self.file_path])
+                
+            logger.info(f'  [-] 已上传{file_type}文件')
             
         except Exception as e:
             logger.error(f"文件上传失败: {str(e)}")
@@ -288,16 +304,31 @@ class DouyinUploader(BaseUploader):
 
     async def set_thumbnail(self, page: Page, thumbnail_path: str):
         """设置视频封面"""
-        if thumbnail_path:
-            await page.click('text="选择封面"')
-            await page.wait_for_selector("div.semi-modal-content:visible")
-            await page.click('text="设置竖封面"')
-            await page.wait_for_timeout(2000)  # 等待2秒
-            await page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").set_input_files(thumbnail_path)
-            await page.wait_for_timeout(2000)  # 等待2秒
-            await page.locator("div[class^='extractFooter'] button:visible:has-text('完成')").click()
+        try:
+            if thumbnail_path:
+                # 点击选择封面
+                await page.click('text="选择封面"')
+                await page.wait_for_selector("div.semi-modal-content:visible")
+                
+                # 点击设置竖封面
+                await page.click('text="设置竖封面"')
+                await page.wait_for_timeout(2000)  # 等待2秒
+                
+                # 上传封面文件
+                await page.locator("div[class^='semi-upload upload'] >> input.semi-upload-hidden-input").set_input_files(thumbnail_path)
+                await page.wait_for_timeout(2000)  # 等待2秒
+                
+                # 点击完成按钮 - 使用更精确的选择器
+                complete_button = page.locator('button.semi-button-primary:has-text("完成")')
+                await complete_button.wait_for(state="visible", timeout=5000)  # 等待按钮可见
+                await complete_button.click()
+                logger.info('  [-] 已完成封面设置')
+                
+        except Exception as e:
+            logger.error(f"设置视频封面失败: {str(e)}")
+            raise
 
-    async def set_location(self, page: Page, location: str = "上海市"):
+    async def set_location(self, page: Page, location: str):
         """设置地区"""
         try:
             if self.file_type == "image":
@@ -370,3 +401,8 @@ class DouyinUploader(BaseUploader):
         except Exception as e:
             logger.error(f"发布过程出错: {str(e)}")
             raise
+
+    with logger.contextualize(platform="douyin"):
+        logger.info("开始获取 Cookie")
+        # Cookie 获取过程
+        logger.info("Cookie 获取完成")

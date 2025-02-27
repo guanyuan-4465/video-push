@@ -1,8 +1,8 @@
 from pathlib import Path
 from sys import stdout
+import sys
 from loguru import logger
 from src.utils.paths import PathManager
-import logging
 
 
 def log_formatter(record: dict) -> str:
@@ -48,42 +48,29 @@ def create_logger(log_name: str, file_path: str):
     return logger.bind(business_name=log_name)
 
 
-def setup_logger():
-    """设置统一的日志系统"""
-    # 移除所有现有处理器
-    logger.remove()
+def setup_logging():
+    """配置日志系统"""
+    log_dir = Path(__file__).parent.parent.parent / "logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
     
-    # 设置日志格式
-    log_format = "{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}"
+    log_file = log_dir / "app.log"
     
-    # 设置日志文件
-    log_file = PathManager.get_logs_dir() / "app.log"
-    
-    # 添加文件处理器
+    # 配置 loguru
+    logger.remove()  # 移除默认处理器
     logger.add(
         log_file,
-        format=log_format,
-        rotation="500 MB",
+        level="INFO",
+        rotation="10 MB",
         retention="10 days",
-        encoding="utf-8"
+        format="{time:YYYY-MM-DD HH:mm:ss} - {name} - {level} - {message}",
+        encoding='utf-8'
     )
-    
-    # 添加控制台处理器
-    logger.add(stdout, colorize=True, format=log_format)
-    
-    # 使用 logging 模块配置日志
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s | %(levelname)s | %(message)s',
-        handlers=[
-            logging.FileHandler(log_file),
-            logging.StreamHandler()
-        ]
-    )
-    
-    return logger
+    logger.add(sys.stdout, level="INFO")  # 添加控制台输出
 
 
-# 创建全局日志对象
-logger = setup_logger()
+# 在应用启动时调用
+setup_logging()
+
+# 导出 logger
+logger = logger.bind(name=__name__)
 

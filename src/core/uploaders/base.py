@@ -10,13 +10,15 @@ class BaseUploader(ABC):
                  tags: List[str],
                  publish_date: Optional[str],
                  account_file: str,
-                 thumbnail_path: Optional[str] = None):
+                 thumbnail_path: Optional[str] = None,
+                 location: Optional[str] = None):
         self.title = title
         self.file_path = file_path
         self.tags = tags or []
         self.publish_date = publish_date
         self.account_file = account_file
         self.thumbnail_path = thumbnail_path
+        self.location = location
 
     @abstractmethod
     async def upload(self, playwright: Playwright) -> bool:

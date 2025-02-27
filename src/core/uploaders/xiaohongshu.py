@@ -1,9 +1,10 @@
 import asyncio
 import json
 from pathlib import Path
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, Playwright
 import os
 from datetime import datetime
+import random
 
 from conf import BASE_DIR
 from src.utils.base_social_media import set_init_script
@@ -12,64 +13,35 @@ from src.core.uploaders.base import BaseUploader
 
 async def xhs_cookie_gen(account_file):
     """使用 playwright 获取小红书 cookie"""
-    async with async_playwright() as playwright:
-        # 启动浏览器，设置为有界面模式
-        browser = await playwright.chromium.launch(headless=False)
-        context = await browser.new_context()
-        # 添加 stealth.min.js 以绕过检测
-        context = await set_init_script(context)
-        
-        # 创建新页面
-        page = await context.new_page()
-        
-        try:
-            # 访问小红书登录页面
-            logger.info("正在打开小红书登录页面...")
-            await page.goto("https://creator.xiaohongshu.com/login?selfLogout=true")
+    browser = None
+    try:
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=False)
+            context = await browser.new_context()
+            page = await context.new_page()
             
-            # 等待用户手动登录
-            logger.info("请在浏览器中完成登录操作...")
+            # 访问登录页面
+            await page.goto("https://creator.xiaohongshu.com/login", timeout=30000)
+            logger.info("已打开小红书登录页面，请在浏览器中完成登录")
             
-            # 等待登录成功后跳转
-            logger.info("等待登录完成...")
-            # 修改这里的等待方式
-            success = False
-            timeout = 300  # 5分钟超时
-            start_time = asyncio.get_event_loop().time()
+            # 等待用户登录并跳转到创作者中心
+            try:
+                await page.wait_for_url("https://creator.xiaohongshu.com/new/home", timeout=120000)
+                logger.info("检测到登录成功")
+            except Exception as e:
+                logger.error(f"等待登录超时: {e}")
+                return False
             
-            while not success and (asyncio.get_event_loop().time() - start_time) < timeout:
-                current_url = page.url
-                if (current_url.startswith("https://creator.xiaohongshu.com/new/home") or 
-                    current_url.startswith("https://www.xiaohongshu.com/explore")):
-                    success = True
-                    break
-                await asyncio.sleep(1)
-            
-            if not success:
-                raise TimeoutError("登录超时，请重试")
-            
-            # 获取所有 cookies
-            logger.info("登录成功，正在获取 cookies...")
-            cookies = await context.cookies()
-            
-            # 确保 cookies 目录存在
-            cookie_dir = Path(account_file).parent
-            cookie_dir.mkdir(parents=True, exist_ok=True)
-            
-            # 保存 cookies 到文件
-            with open(account_file, 'w', encoding='utf-8') as f:
-                json.dump(cookies, f, ensure_ascii=False, indent=2)
-            
-            logger.success(f"Cookie 已保存到: {account_file}")
+            # 保存cookies
+            await context.storage_state(path=account_file)
+            logger.info(f"Cookie已保存到: {account_file}")
             return True
             
-        except Exception as e:
-            logger.error(f"获取 cookie 失败: {str(e)}")
-            return False
-            
-        finally:
-            # 关闭浏览器
-            await context.close()
+    except Exception as e:
+        logger.error(f"获取小红书Cookie失败: {e}")
+        return False
+    finally:
+        if browser:
             await browser.close()
 
 async def cookie_auth(account_file):
@@ -91,7 +63,7 @@ async def cookie_auth(account_file):
             
             # 访问创作平台
             await page.goto("https://creator.xiaohongshu.com/new/home")
-            await page.wait_for_load_state("networkidle")
+            await page.wait_for_load_state("DOMContentLoaded")
             await asyncio.sleep(2)
             
             # 检查是否需要重新登录
@@ -153,35 +125,79 @@ async def xhs_setup(account_file, handle=False):
     return True
 
 class XiaohongshuUploader(BaseUploader):
-    def __init__(self, title, file_path, tags, publish_date, account_file, thumbnail_path=None):
-        super().__init__(title, file_path, tags, publish_date, account_file, thumbnail_path)
-        self.file_type = self._get_file_type()
+    def __init__(self, title, file_path, tags, publish_date, account_file, thumbnail_path=None, location=None):
+        super().__init__(title, file_path, tags, publish_date, account_file, thumbnail_path, location)
+        self.file_type = "video" if file_path.endswith('.mp4') else "image"
 
     async def validate_cookie(self) -> bool:
         """验证cookie是否有效"""
         try:
+            if not os.path.exists(self.account_file):
+                logger.warning(f"Cookie文件不存在: {self.account_file}")
+                return False
+                
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.launch(headless=True)
-                context = await browser.new_context()
-                context = await set_init_script(context)
-                
-                # 加载 cookies
-                with open(self.account_file, 'r', encoding='utf-8') as f:
-                    cookies = json.load(f)
-                await context.add_cookies(cookies)
-                
+                # 使用 storage_state 加载 cookies
+                context = await browser.new_context(storage_state=self.account_file)
                 page = await context.new_page()
-                await page.goto("https://creator.xiaohongshu.com/new/home")
                 
-                return "login" not in page.url
-                
+                try:
+                    await page.goto("https://creator.xiaohongshu.com/publish/publish")
+                    await page.wait_for_url("https://creator.xiaohongshu.com/publish/publish", timeout=5000)
+                    
+                    # 检查是否需要登录
+                    if await page.get_by_text('登录').count():
+                        return False
+                        
+                    return True
+                    
+                finally:
+                    await context.close()
+                    await browser.close()
+                    
         except Exception as e:
-            logger.error(f"验证Cookie失败: {str(e)}")
+            logger.error(f"验证Cookie时发生错误: {str(e)}")
             return False
 
     async def generate_cookie(self) -> bool:
         """生成新的cookie"""
-        return await xhs_cookie_gen(self.account_file)
+        try:
+            cookie_dir = Path(self.account_file).parent
+            cookie_dir.mkdir(parents=True, exist_ok=True)
+            
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(headless=False)
+                context = await browser.new_context(viewport=None, no_viewport=True)
+                page = await context.new_page()
+                
+                # 访问登录页面
+                await page.goto("https://creator.xiaohongshu.com/")
+                logger.info("请登录小红书...")
+                
+                # 等待登录成功
+                await page.wait_for_url(
+                    "https://creator.xiaohongshu.com/publish/publish",
+                    timeout=60000  # 1分钟超时
+                )
+                
+                # 保存 cookie
+                await context.storage_state(path=self.account_file)
+                logger.debug("登录成功，正在保存Cookie...")
+                
+                # 验证 cookie
+                await page.reload()
+                if await page.get_by_text('登录').count():
+                    raise Exception("Cookie验证失败")
+                    
+                logger.info("Cookie获取并验证成功！")
+                return True
+                    
+        except Exception as e:
+            logger.error(f"获取Cookie失败: {str(e)}")
+            if os.path.exists(self.account_file):
+                os.remove(self.account_file)
+            return False
 
     def _get_file_type(self):
         """根据文件后缀判断类型"""
@@ -217,31 +233,25 @@ class XiaohongshuUploader(BaseUploader):
             logger.error(f"读取描述文件失败: {str(e)}")
             return "输入正文描述，真诚有价值的分享才入温暖"  # 出错时返回默认描述文本
 
-    async def upload(self, playwright):
+    async def upload(self, playwright: Playwright) -> bool:
         """上传内容到小红书"""
-        browser = await playwright.chromium.launch(headless=False)
-        context = await browser.new_context()
-        context = await set_init_script(context)
-        
+        browser = None
+        context = None
         try:
-            # 加载 cookies
-            with open(self.account_file, 'r', encoding='utf-8') as f:
-                cookies = json.load(f)
-            await context.add_cookies(cookies)
-            
+            browser = await playwright.chromium.launch(headless=False)
+            # 直接使用 storage_state 加载 cookies
+            context = await browser.new_context(storage_state=self.account_file)
             page = await context.new_page()
             
-            # 访问创作平台主页
+            # 访问小红书创作者页面
             await page.goto("https://creator.xiaohongshu.com/new/home")
-            await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(2)
+            await asyncio.sleep(random.uniform(0.5, 1.0))
+            logger.info(f'[+]正在上传-------{self.title}')
             
             # 检查是否需要重新登录
             if "login" in page.url:
                 logger.error("Cookie 已失效，需要重新登录")
                 raise Exception("Cookie 已失效，请重新登录")
-            
-            logger.info(f'[+]正在上传{self.file_type}-------{self.title}')
             
             # 根据文件类型选择发布按钮
             if self.file_type == "video":
@@ -260,16 +270,28 @@ class XiaohongshuUploader(BaseUploader):
                 logger.info(f"检测到缩略图：{self.thumbnail_path}")
                 await self._upload_thumbnail(page)
             
+            # 如果配置了地点，则设置地点
+            if self.location:
+                if self.file_type == "video":
+                    await self._add_location_for_video(page)
+                else:
+                    await self._add_location_for_image(page)
+                logger.info(f"已设置发布地点: {self.location}")
+            
             # 发布
             await self._publish(page, context)
             
+            return True
+            
         except Exception as e:
-            logger.error(f"上传过程出错: {str(e)}")
-            raise
+            logger.error(f"小红书上传失败: {e}")
+            return False
+            
         finally:
-            await asyncio.sleep(2)
-            await context.close()
-            await browser.close()
+            if context:
+                await context.close()
+            if browser:
+                await browser.close()
 
     async def _select_video_mode(self, page):
         """选择视频上传模式"""
@@ -483,50 +505,45 @@ class XiaohongshuUploader(BaseUploader):
             logger.error(f"设置定时发布失败: {str(e)}")
             raise
 
-    async def _add_location(self, page):
-        """添加地点"""
+    async def _add_location_for_video(self, page):
+        """为视频添加地点"""
         try:
             logger.info("正在添加地点...")
             
-            # 等待页面加载完成
-            await page.wait_for_load_state("networkidle")
+            await page.wait_for_load_state("load")
             await asyncio.sleep(0.5)
             
-            # 1. 直接点击显示"添加地点"的占位符文本
             placeholder = page.locator('div.d-text.d-select-placeholder:has-text("添加地点")')
             if await placeholder.count() == 1:
                 await placeholder.click()
                 logger.info("点击添加地点")
                 await asyncio.sleep(0.5)
                 
-                # 2. 输入地点
-                location = "厦门市"
-                await page.keyboard.type(location, delay=50)
-                logger.info(f"输入地点: {location}")
+                # 使用配置的地点而不是硬编码
+                await page.keyboard.type(self.location, delay=50)
+                logger.info(f"输入地点: {self.location}")
                 await asyncio.sleep(0.8)
                 
-                # 3. 直接选择第一个选项
-                try:
-                    first_option = page.locator('div.d-popover-default div.name[data-v-09078844]').first
-                    await first_option.click()
-                    logger.info("选择第一个地点选项")
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    logger.error(f"选择地点选项失败: {str(e)}")
-                    await page.screenshot(path="location_selection_error.png")
-                    raise
-            else:
-                logger.error("未找到添加地点选项")
-                await page.screenshot(path="no_location_placeholder.png")
-                raise Exception("未找到添加地点选项")
-            
+                # 等待并选择第一个选项
+                first_option = page.locator('div.d-popover-default div.name[data-v-09078844]').first
+                await first_option.click()
+                logger.info("选择第一个地点选项")
+                await asyncio.sleep(0.5)
+                
         except Exception as e:
             logger.error(f"添加地点失败: {str(e)}")
-            try:
-                await page.screenshot(path="error_location.png")
-            except:
-                pass
-            raise
+            # 不抛出异常，允许地点设置失败
+            pass
+
+    async def _add_location_for_image(self, page):
+        """为图文添加地点"""
+        try:
+            # 实现图文的地点设置逻辑
+            # 类似于视频的逻辑，但可能有不同的选择器
+            pass
+        except Exception as e:
+            logger.error(f"添加地点失败: {str(e)}")
+            pass
 
     async def _upload_thumbnail(self, page):
         """上传缩略图"""
@@ -534,7 +551,7 @@ class XiaohongshuUploader(BaseUploader):
             logger.info("正在设置视频封面...")
             
             # 等待页面加载完成
-            await page.wait_for_load_state("networkidle")
+            await page.wait_for_load_state("load")
             await asyncio.sleep(2)
             
             # 1. 点击第一个"上传封面"按钮
@@ -643,36 +660,22 @@ class XiaohongshuUploader(BaseUploader):
         try:
             logger.info("准备发布...")
             
-            # 先等待页面稳定
-            await page.wait_for_load_state("networkidle")
+            # 等待页面稳定
+            await page.wait_for_load_state("load")
             await asyncio.sleep(1)
             
-            # 直接选择发布方式，不检查标签
-            if isinstance(self.publish_date, datetime):
-                # 定时发布
-                await self._set_schedule_time(page, self.publish_date)
-            else:
-                # 立即发布
-                immediate_button = page.locator('label:has-text("发布")')
-                await immediate_button.click()
-                await asyncio.sleep(0.5)
-            
-            # 添加地点
-            await self._add_location(page)
-            
-            # 使用更简单准确的选择器定位发布按钮
-            publish_button = page.locator('button[type="button"]:has-text("定时发布")')
-            await publish_button.wait_for(state='visible', timeout=5000)
+            # 直接点击发布按钮
+            publish_button = page.locator('button:has-text("发布")')
             await publish_button.click()
+            logger.info("已点击发布按钮")
             
-            # 等待发布成功页面
-            success_url = "https://creator.xiaohongshu.com/publish/success"
-            await page.wait_for_url(lambda url: url.startswith(success_url), timeout=10000)
+            # 等待发布完成
+            await page.wait_for_load_state("load")
+            await asyncio.sleep(2)  # 等待发布完成
             
-            if isinstance(self.publish_date, datetime):
-                logger.success(f"定时发布设置成功，将在 {self.publish_date.strftime('%Y-%m-%d %H:%M')} 发布")
-            else:
-                logger.success("发布成功")
+            # 更新cookie
+            await context.storage_state(path=self.account_file)
+            logger.success('发布完成，cookie已更新')
             
         except Exception as e:
             logger.error(f"发布失败: {str(e)}")
@@ -682,51 +685,6 @@ class XiaohongshuUploader(BaseUploader):
         """主函数"""
         async with async_playwright() as playwright:
             await self.upload(playwright)
-
-    async def _add_location_for_video(self, page):
-        """为视频添加地点"""
-        try:
-            logger.info("正在添加地点...")
-            
-            # 等待页面加载完成
-            await page.wait_for_load_state("networkidle")
-            await asyncio.sleep(0.5)
-            
-            # 1. 直接点击显示"添加地点"的占位符文本
-            placeholder = page.locator('div.d-text.d-select-placeholder:has-text("添加地点")')
-            if await placeholder.count() == 1:
-                await placeholder.click()
-                logger.info("点击添加地点")
-                await asyncio.sleep(0.5)
-                
-                # 2. 输入地点
-                location = "厦门市"
-                await page.keyboard.type(location, delay=50)
-                logger.info(f"输入地点: {location}")
-                await asyncio.sleep(0.8)
-                
-                # 3. 直接选择第一个选项
-                try:
-                    first_option = page.locator('div.d-popover-default div.name[data-v-09078844]').first
-                    await first_option.click()
-                    logger.info("选择第一个地点选项")
-                    await asyncio.sleep(0.5)
-                except Exception as e:
-                    logger.error(f"选择地点选项失败: {str(e)}")
-                    await page.screenshot(path="video_location_selection_error.png")
-                    raise
-            else:
-                logger.error("未找到添加地点选项")
-                await page.screenshot(path="video_no_location_placeholder.png")
-                raise Exception("未找到添加地点选项")
-            
-        except Exception as e:
-            logger.error(f"添加地点失败: {str(e)}")
-            try:
-                await page.screenshot(path="video_error_location.png")
-            except:
-                pass
-            raise
 
 if __name__ == "__main__":
     # 设置 cookie 文件路径

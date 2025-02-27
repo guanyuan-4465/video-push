@@ -12,13 +12,17 @@ def main():
         # 1. 先创建Qt应用
         app = QApplication(sys.argv)
         
-        # 2. 创建并显示主窗口
+        # 2. 初始化进程池
+        logger.info("正在初始化进程池...")
+        if not initialize_process_pool():
+            logger.error("进程池初始化失败")
+            raise RuntimeError("进程池初始化失败")
+        else:
+            logger.info("进程池初始化成功")
+            
+        # 3. 创建并显示主窗口
         window = MainWindow()
         window.show()
-
-        # 3. 初始化进程池（延迟到GUI显示后）
-        if not initialize_process_pool():
-            raise RuntimeError("进程池初始化失败")
             
         # 4. 启动任务队列处理
         task_queue = TaskQueue()
