@@ -1,56 +1,56 @@
 [
   {
-    "id": "2245127c-1e0b-4d5b-b67a-097c7752f2cc",
-    "platform": "douyin",
-    "content_path": "D:\\dianshang\\videopush\\videos\\video-1",
-    "schedule_time": "2025-02-27T18:00:58.227518",
-    "status": "failed",
-    "created_at": "2025-02-27T18:00:58.227518",
-    "error": "上传失败"
-  },
-  {
-    "id": "58045f2e-3a75-4ae3-8f03-6039959382e6",
-    "platform": "douyin",
-    "content_path": "D:\\dianshang\\videopush\\videos\\video-2",
-    "schedule_time": "2025-02-27T18:00:58.228517",
-    "status": "failed",
-    "created_at": "2025-02-27T18:00:58.228517",
-    "error": "上传失败"
-  },
-  {
-    "id": "9ae74629-1ccc-4e2a-b0de-74c8d4d00d2e",
-    "platform": "xiaohongshu",
-    "content_path": "D:\\dianshang\\videopush\\videos\\video-1",
-    "schedule_time": "2025-02-27T18:00:58.241522",
-    "status": "failed",
-    "created_at": "2025-02-27T18:00:58.241522",
-    "error": "上传失败"
-  },
-  {
-    "id": "22921d6d-25f5-405c-be49-38c6056147e1",
-    "platform": "xiaohongshu",
-    "content_path": "D:\\dianshang\\videopush\\videos\\video-2",
-    "schedule_time": "2025-02-27T18:00:58.241522",
-    "status": "failed",
-    "created_at": "2025-02-27T18:00:58.241522",
-    "error": "上传失败"
-  },
-  {
-    "id": "ce1adcdd-1e3d-4a5e-b912-7a359190cde8",
+    "id": "9c3a330c-d19b-40ee-93bd-78cb188780fa",
     "platform": "douyin",
     "content_path": "D:\\dianshang\\videopush\\baizenweb004_new\\videos\\video1",
-    "schedule_time": "2025-02-27T18:01:19.161699",
+    "schedule_time": "2025-02-28T09:14:02.455529",
     "status": "failed",
-    "created_at": "2025-02-27T18:01:19.161699",
+    "created_at": "2025-02-28T09:14:02.455529",
     "error": "上传失败"
   },
   {
-    "id": "0179321b-d71d-4e0c-8319-afc30287bc21",
+    "id": "b8bee75d-e3e7-4d60-b262-6645a3ff3656",
     "platform": "xiaohongshu",
     "content_path": "D:\\dianshang\\videopush\\baizenweb004_new\\videos\\video1",
-    "schedule_time": "2025-02-27T18:01:19.171698",
+    "schedule_time": "2025-02-28T09:18:49.883000",
+    "status": "completed",
+    "created_at": "2025-02-28T09:14:02.464529",
+    "error": null
+  },
+  {
+    "id": "ed5f66b9-285a-4152-ba96-4712c7a7f034",
+    "platform": "douyin",
+    "content_path": "D:\\dianshang\\videopush\\baizenweb004_new\\videos\\video1",
+    "schedule_time": "2025-02-28T09:14:23.611863",
     "status": "failed",
-    "created_at": "2025-02-27T18:01:19.171698",
+    "created_at": "2025-02-28T09:14:23.611863",
+    "error": "上传失败"
+  },
+  {
+    "id": "7617d5ee-6384-4d24-9221-76ee12f763aa",
+    "platform": "xiaohongshu",
+    "content_path": "D:\\dianshang\\videopush\\baizenweb004_new\\videos\\video1",
+    "schedule_time": "2025-02-28T09:14:23.622899",
+    "status": "failed",
+    "created_at": "2025-02-28T09:14:23.622899",
+    "error": "上传失败"
+  },
+  {
+    "id": "30c61d3d-4726-4478-8620-17cf6863df46",
+    "platform": "douyin",
+    "content_path": "D:\\dianshang\\videopush\\baizenweb004_new\\videos\\video1",
+    "schedule_time": "2025-02-28T09:14:39.500809",
+    "status": "completed",
+    "created_at": "2025-02-28T09:14:39.500809",
+    "error": null
+  },
+  {
+    "id": "9ac1713d-37b3-4c7b-b96f-2d0d51cde44d",
+    "platform": "xiaohongshu",
+    "content_path": "D:\\dianshang\\videopush\\baizenweb004_new\\videos\\video1",
+    "schedule_time": "2025-02-28T09:14:39.510808",
+    "status": "failed",
+    "created_at": "2025-02-28T09:14:39.510808",
     "error": "上传失败"
   }
 ]

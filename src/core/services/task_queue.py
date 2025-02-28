@@ -98,8 +98,8 @@ class TaskQueue:
             'xiaohongshu': None
         }  # 记录每个平台最后执行时间
         self.platform_intervals = {
-            'douyin': 300,  # 抖音发布间隔5分钟
-            'xiaohongshu': 300  # 小红书发布间隔5分钟
+            'douyin': 60,  # 抖音发布间隔1分钟
+            'xiaohongshu': 60  # 小红书发布间隔1分钟
         }  # 平台发布间隔（秒）
         self._load_tasks()
         

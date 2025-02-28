@@ -1,7 +1,6 @@
 from pathlib import Path
 from typing import Optional
 from src.utils.log import logger
-from src.core.uploaders.base import BaseUploader
 
 class CookieService:
     def __init__(self):

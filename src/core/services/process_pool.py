@@ -19,7 +19,7 @@ class ProcessPoolManager:
     def initialize_pool(self, max_workers: Optional[int] = None):
         """初始化进程池"""
         if max_workers is None:
-            max_workers = multiprocessing.cpu_count()
+            max_workers = min(2, multiprocessing.cpu_count())
         
         if self._pool is None:
             self._pool = ProcessPoolExecutor(max_workers=max_workers)
